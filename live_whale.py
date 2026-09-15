@@ -1,21 +1,47 @@
 # -*- coding: utf-8 -*-
 # رادار الحيتان الحي — Live Whale Radar (free stack: GitHub Actions + Yahoo data + ntfy push)
 # يفحص القائمة كل ~5 دقايق وقت السوق الأمريكي، وإذا دخل فوليوم حوت على سهم يرسل تنبيه فوري للجوال.
-import json, os, sys, urllib.request
+import json, os, sys, time, urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
-WATCHLIST = ["AAPL", "NVDA", "AMD", "TSLA", "AVGO", "MU", "XPEV"]  # حلال فقط
+# القائمة مرشحة مبدئيًا (تم استبعاد البنوك/التأمين/الخمور/القمار/التبغ) — الفحص الشرعي النهائي عليك:
+# احذف أي رمز ما يجتاز فحصك قبل الاعتماد.
+WATCHLIST = [
+    # التقنية الكبرى والبرمجيات
+    "AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "NVDA", "ADBE", "CRM", "ORCL",
+    "NOW", "SNOW", "PLTR", "SHOP", "UBER", "ABNB", "TEAM", "WDAY", "DDOG", "NET",
+    "CRWD", "ZS", "PANW", "FTNT", "INTU",
+    # الشرائح وأشباه الموصلات
+    "AMD", "AVGO", "MU", "INTC", "QCOM", "TXN", "ADI", "LRCX", "AMAT", "KLAC",
+    "ASML", "TSM", "SMCI", "ARM", "MRVL", "ON", "NXPI", "MPWR", "CDNS", "SNPS",
+    # السيارات الكهربائية
+    "XPEV", "NIO", "LI", "RIVN", "LCID",
+    # الصحة والأدوية والأجهزة الطبية
+    "LLY", "JNJ", "ABBV", "MRK", "PFE", "AMGN", "GILD", "VRTX", "REGN", "ISRG",
+    "MDT", "SYK", "BSX", "ZTS", "DHR",
+    # الاستهلاكية والتجزئة
+    "PG", "KO", "PEP", "COST", "WMT", "HD", "NKE", "SBUX", "LULU", "TJX",
+    "ORLY", "AZO",
+    # الطاقة والمواد
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "HAL", "FCX", "LIN", "SCCO",
+    # الصناعة
+    "CAT", "DE", "HON", "UNP", "GE", "ETN", "EMR", "PH",
+    # بنية تحتية تقنية
+    "DELL", "CSCO", "IBM", "ANET", "VRT",
+]
 NTFY_TOPIC = "radar-hout-yk8on5jf"          # قناة التنبيهات في تطبيق ntfy
 CAPITAL_USD = 1000                           # رأس المال لحساب عدد الأسهم
 SPIKE_X = 3.0        # فوليوم الشمعة >= 3x وسيط آخر 20 شمعة (بصمة الحوت)
 PACE_X = 1.5         # فوليوم اليوم التراكمي >= 1.5x متوسط نفس الوقت من الأيام السابقة
 CLV_MIN = 0.6        # الإغلاق قريب من أعلى الشمعة (شراء مو بيع)
-MIN_SCORE = 55
+MIN_SCORE = 60       # رفعناه مع توسيع القائمة عشان تجيك الإشارات الأقوى بس
+MAX_ALERTS_PER_RUN = 3   # أقصى عدد تنبيهات بالجولة الوحدة (الأقوى أولًا)
 COOLDOWN_MIN = 45    # لا يكرر التنبيه لنفس السهم قبل مرور هالمدة
+CHUNK = 25           # تحميل البيانات على دفعات لتفادي حدود ياهو
 STATE_FILE = "state.json"
 
 ET = ZoneInfo("America/New_York")
@@ -51,6 +77,31 @@ def load_state():
 
 def money(x):
     return "-" if x is None else f"${x:,.2f}"
+
+
+def fetch_all(symbols):
+    """تحميل بيانات 5 دقايق/5 أيام على دفعات."""
+    import yfinance as yf
+    frames = {}
+    for i in range(0, len(symbols), CHUNK):
+        chunk = symbols[i:i + CHUNK]
+        try:
+            data = yf.download(
+                " ".join(chunk), period="5d", interval="5m",
+                group_by="ticker", auto_adjust=False, progress=False, threads=True,
+            )
+        except Exception as e:
+            print(f"[dl-err] chunk {i // CHUNK + 1}: {e}")
+            continue
+        for sym in chunk:
+            try:
+                df = data[sym] if isinstance(data.columns, pd.MultiIndex) else data
+                frames[sym] = df.copy()
+            except Exception:
+                print(f"[nodata] {sym}")
+        if i + CHUNK < len(symbols):
+            time.sleep(2)
+    return frames
 
 
 def analyze(sym, df, now_et):
@@ -160,23 +211,19 @@ def main():
     now_et = datetime.now(ET)
     test = os.environ.get("TEST") == "1" or "--test" in sys.argv
     if test:
-        push("🐋 اختبار رادار الحيتان", "التنبيهات وصلتك ✅ النظام جاهز. هذا اختبار — مو صفقة.", 4)
+        push("🐋 اختبار رادار الحيتان", f"التنبيهات وصلتك ✅ النظام جاهز ويراقب {len(WATCHLIST)} سهم. هذا اختبار — مو صفقة.", 4)
         print("[test] push sent")
 
     if not market_open(now_et):
         print(f"[closed] {now_et.isoformat()}")
         return
 
-    import yfinance as yf
-    data = yf.download(
-        " ".join(WATCHLIST), period="5d", interval="5m",
-        group_by="ticker", auto_adjust=False, progress=False, threads=True,
-    )
+    frames = fetch_all(WATCHLIST)
+    print(f"[data] got {len(frames)}/{len(WATCHLIST)} symbols")
     state = load_state()
     hits = []
-    for sym in WATCHLIST:
+    for sym, df in frames.items():
         try:
-            df = data[sym] if isinstance(data.columns, pd.MultiIndex) else data
             df = df.copy()
             if df.index.tz is None:
                 df.index = df.index.tz_localize("UTC")
@@ -186,7 +233,6 @@ def main():
             print(f"[err] {sym}: {e}")
             continue
         if not a:
-            print(f"[no] {sym}")
             continue
         last = state.get(sym)
         if last:
@@ -196,21 +242,26 @@ def main():
                     continue
             except Exception:
                 pass
-        state[sym] = now_et.isoformat()
         hits.append((sym, a))
 
     hits.sort(key=lambda x: x[1]["score"], reverse=True)
+    sent = 0
     for sym, a in hits:
+        if sent >= MAX_ALERTS_PER_RUN:
+            print(f"[skip-cap] {sym} score={a['score']}")
+            continue
         title, msg = alert_text(sym, a)
         try:
             push(title, msg)
+            state[sym] = now_et.isoformat()
+            sent += 1
             print(f"[ALERT] {sym} score={a['score']} spike=x{a['spike']:.1f}")
         except Exception as e:
             print(f"[push-err] {sym}: {e}")
 
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
-    print(f"[done] {now_et.isoformat()} hits={len(hits)}")
+    print(f"[done] {now_et.isoformat()} hits={len(hits)} sent={sent}")
 
 
 if __name__ == "__main__":
