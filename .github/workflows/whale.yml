@@ -1,8 +1,16 @@
 name: whale-radar-live
 on:
   schedule:
-    - cron: "*/5 13-21 * * 1-5"   # كل 5 دقايق وقت جلسة السوق الأمريكي (UTC) — السكربت نفسه يتأكد من ساعات السوق بدقة
+    # جلستان يوميًا (UTC) تغطّيان السوق الأمريكي كامل 13:30–20:00 — كل جلسة تلفّ داخليًا كل 5 دقايق.
+    # (جدولة */5 ما تنفع: GitHub يؤخّرها ساعات ويتخطّاها — لذلك حلقة واحدة طويلة أوثق بكثير)
+    - cron: "20 13 * * 1-5"   # 16:20 بتوقيت السعودية → تغطي الافتتاح حتى 16:55 UTC
+    - cron: "50 16 * * 1-5"   # 19:50 بتوقيت السعودية → تغطي حتى الإغلاق 20:05 UTC
   workflow_dispatch:
+    inputs:
+      loop:
+        description: "شغّل حلقة الجلسة كاملة (كل 5 دقايق حتى الإغلاق) بدل فحص اختبار واحد"
+        type: boolean
+        default: false
   push:
     paths-ignore:
       - "state.json"
@@ -17,7 +25,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -28,14 +36,34 @@ jobs:
       - name: Install
         run: pip install -q yfinance pandas numpy
 
-      - name: Scan
+      - name: Scan (single test, or 5-minute session loop)
         env:
-          TEST: ${{ github.event_name != 'schedule' && '1' || '0' }}
-        run: python live_whale.py
-
-      - name: Save state
+          TEST: ${{ (github.event_name == 'schedule' || inputs.loop == true) && '0' || '1' }}
         run: |
           git config user.name "whale-bot"
           git config user.email "whale-bot@users.noreply.github.com"
-          git add state.json 2>/dev/null || true
-          git diff --cached --quiet || { git commit -m "state update"; git push; }
+          save_state() {
+            git add state.json 2>/dev/null || true
+            if ! git diff --cached --quiet; then
+              git commit -q -m "state update"
+              git pull --rebase -q origin main || true
+              git push -q || true
+            fi
+          }
+          if [ "$TEST" = "1" ]; then
+            python live_whale.py || true
+            save_state
+            exit 0
+          fi
+          # نهاية الحلقة: الجلسة الأولى تنتهي 16:55 UTC، والثانية 20:05 UTC (بعد الإغلاق بشوي)
+          H=$(date -u +%H | sed 's/^0//')
+          if [ "$H" -lt 16 ]; then END=1655; else END=2005; fi
+          echo "session loop until $END UTC (every 5 min)"
+          while :; do
+            NOW=$(date -u +%H%M | sed 's/^0*//'); NOW=${NOW:-0}
+            [ "$NOW" -ge "$END" ] && break
+            python live_whale.py || true
+            save_state
+            sleep 300
+          done
+          echo "session loop finished"
