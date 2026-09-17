@@ -1,10 +1,11 @@
 name: whale-radar-live
 on:
   schedule:
-    # جلستان يوميًا (UTC) تغطّيان السوق الأمريكي كامل 13:30–20:00 — كل جلسة تلفّ داخليًا كل 5 دقايق.
+    # الجلسة الأولى تغطي أغلب السوق (13:20→19:00 UTC، قريب من حد GitHub 6 ساعات) والثانية تكمل للإغلاق (→20:05) — كل جلسة تلفّ داخليًا كل 5 دقايق.
     # (جدولة */5 ما تنفع: GitHub يؤخّرها ساعات ويتخطّاها — لذلك حلقة واحدة طويلة أوثق بكثير)
     - cron: "20 13 * * 1-5"   # 16:20 بتوقيت السعودية → تغطي الافتتاح حتى 16:55 UTC
     - cron: "50 16 * * 1-5"   # 19:50 بتوقيت السعودية → تغطي حتى الإغلاق 20:05 UTC
+    - cron: "5,35 14-19 * * 1-5"   # احتياط ذاتي الإصلاح كل نص ساعة: لو تخطّى GitHub أي جدولة، اللي بعدها تكمل لحالها
   workflow_dispatch:
     inputs:
       loop:
@@ -25,7 +26,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -55,9 +56,9 @@ jobs:
             save_state
             exit 0
           fi
-          # نهاية الحلقة: الجلسة الأولى تنتهي 16:55 UTC، والثانية 20:05 UTC (بعد الإغلاق بشوي)
+          # نهاية الحلقة: أي جلسة تبدأ قبل 19:00 UTC تنتهي 19:00، وما بعدها ينتهي 20:05 UTC (بعد الإغلاق بشوي)
           H=$(date -u +%H | sed 's/^0//')
-          if [ "$H" -lt 16 ]; then END=1655; else END=2005; fi
+          if [ "$H" -lt 19 ]; then END=1900; else END=2005; fi
           echo "session loop until $END UTC (every 5 min)"
           while :; do
             NOW=$(date -u +%H%M | sed 's/^0*//'); NOW=${NOW:-0}
