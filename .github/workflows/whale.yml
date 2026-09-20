@@ -1,20 +1,27 @@
 name: whale-radar-live
 on:
   schedule:
-    # الجلسة الأولى تغطي أغلب السوق (13:20→19:00 UTC، قريب من حد GitHub 6 ساعات) والثانية تكمل للإغلاق (→20:05) — كل جلسة تلفّ داخليًا كل 5 دقايق.
-    # (جدولة */5 ما تنفع: GitHub يؤخّرها ساعات ويتخطّاها — لذلك حلقة واحدة طويلة أوثق بكثير)
-    - cron: "20 13 * * 1-5"   # 16:20 بتوقيت السعودية → تغطي الافتتاح حتى 16:55 UTC
-    - cron: "50 16 * * 1-5"   # 19:50 بتوقيت السعودية → تغطي حتى الإغلاق 20:05 UTC
-    - cron: "5,35 14-19 * * 1-5"   # احتياط ذاتي الإصلاح كل نص ساعة: لو تخطّى GitHub أي جدولة، اللي بعدها تكمل لحالها
+    # كل تشغيلة تلفّ كل 5 دقايق من وقت بدايتها حتى الإقفال (20:05 UTC) أو حد GitHub (345 دقيقة) — أيهما أقرب.
+    # الجدولة الاحتياطية كل نص ساعة تصلّح نفسها: لو تخطّى GitHub أي وحدة، اللي بعدها تكمل لحالها.
+    - cron: "20 13 * * 1-5"   # 16:20 بتوقيت السعودية (قبل الافتتاح)
+    - cron: "50 16 * * 1-5"   # 19:50 بتوقيت السعودية
+    - cron: "5,35 14-19 * * 1-5"   # احتياط ذاتي الإصلاح كل نص ساعة
   workflow_dispatch:
     inputs:
       loop:
-        description: "شغّل حلقة الجلسة كاملة (كل 5 دقايق حتى الإغلاق) بدل فحص اختبار واحد"
+        description: "شغّل حلقة الجلسة كاملة (كل 5 دقايق حتى الإقفال) بدل فحص اختبار واحد"
+        type: boolean
+        default: false
+      evaluate:
+        description: "شغّل تقييم نتائج اليوم فقط (بعد الإقفال)"
         type: boolean
         default: false
   push:
     paths-ignore:
       - "state.json"
+      - "alerts.jsonl"
+      - "results.csv"
+      - "daily_cache.json"
 
 permissions:
   contents: write
@@ -26,7 +33,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -37,34 +44,48 @@ jobs:
       - name: Install
         run: pip install -q yfinance pandas numpy
 
-      - name: Scan (single test, or 5-minute session loop)
+      - name: Scan (test / evaluate / 5-minute session loop)
         env:
-          TEST: ${{ (github.event_name == 'schedule' || inputs.loop == true) && '0' || '1' }}
+          MODE: ${{ github.event_name == 'schedule' && 'loop' || (inputs.evaluate == true && 'evaluate' || (inputs.loop == true && 'loop' || 'test')) }}
         run: |
           git config user.name "whale-bot"
           git config user.email "whale-bot@users.noreply.github.com"
           save_state() {
-            git add state.json 2>/dev/null || true
+            git add state.json alerts.jsonl results.csv daily_cache.json 2>/dev/null || true
             if ! git diff --cached --quiet; then
               git commit -q -m "state update"
               git pull --rebase -q origin main || true
-              git push -q || true
+              git push -q origin HEAD:main || true
             fi
           }
-          if [ "$TEST" = "1" ]; then
-            python live_whale.py || true
+          echo "MODE=$MODE"
+          if [ "$MODE" = "test" ]; then
+            TEST=1 python live_whale.py || true
+            exit 0
+          fi
+          if [ "$MODE" = "evaluate" ]; then
+            python live_whale.py --evaluate || true
             save_state
             exit 0
           fi
-          # نهاية الحلقة: أي جلسة تبدأ قبل 19:00 UTC تنتهي 19:00، وما بعدها ينتهي 20:05 UTC (بعد الإغلاق بشوي)
-          H=$(date -u +%H | sed 's/^0//')
-          if [ "$H" -lt 19 ]; then END=1900; else END=2005; fi
-          echo "session loop until $END UTC (every 5 min)"
+          # حلقة الجلسة: من الآن حتى min(البداية+345 دقيقة، 20:05 UTC)
+          START_MIN=$((10#$(date -u +%H) * 60 + 10#$(date -u +%M)))
+          CLOSE_MIN=$((20 * 60 + 5))
+          END_MIN=$((START_MIN + 345)); [ "$END_MIN" -gt "$CLOSE_MIN" ] && END_MIN=$CLOSE_MIN
+          echo "session loop: start $START_MIN → end $END_MIN (minutes UTC), every 5 min"
           while :; do
-            NOW=$(date -u +%H%M | sed 's/^0*//'); NOW=${NOW:-0}
-            [ "$NOW" -ge "$END" ] && break
+            NOW_MIN=$((10#$(date -u +%H) * 60 + 10#$(date -u +%M)))
+            [ "$NOW_MIN" -ge "$END_MIN" ] && break
             python live_whale.py || true
             save_state
             sleep 300
           done
           echo "session loop finished"
+          # التقييم بعد الإقفال — فقط التشغيلة اللي وصلت للإقفال، ومرة وحدة باليوم
+          if [ "$END_MIN" -eq "$CLOSE_MIN" ]; then
+            TODAY=$(date -u +%F)
+            if ! grep -q "^$TODAY," results.csv 2>/dev/null; then
+              python live_whale.py --evaluate || true
+              save_state
+            fi
+          fi
