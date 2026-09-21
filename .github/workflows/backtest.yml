@@ -1,0 +1,54 @@
+name: whale-backtest
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "عدد أيام التداول (حد ياهو لشموع 5 دقايق = 59)"
+        default: "59"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: whale-backtest
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -q yfinance pandas numpy
+
+      - name: Backtest (same analyze() as live_whale.py, replayed bar by bar)
+        env:
+          DAYS: ${{ inputs.days || '59' }}
+        run: python backtest.py
+
+      - name: Save results to repo
+        if: always()
+        run: |
+          git config user.name "whale-bot"
+          git config user.email "whale-bot@users.noreply.github.com"
+          git add backtest_results.csv backtest_summary.txt 2>/dev/null || true
+          if git diff --cached --quiet; then echo "nothing to save"; exit 0; fi
+          git commit -q -m "backtest results [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -q origin main && git push -q origin HEAD:main && echo "pushed" && break
+            echo "push retry $i"; sleep 15
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest
+          path: |
+            backtest_results.csv
+            backtest_summary.txt
