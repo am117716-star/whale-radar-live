@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-VERSION = "3.0"
+VERSION = "3.0.1"
 
 # ============================ القائمة (100 سهم) ============================
 WATCHLIST = [
@@ -582,7 +582,9 @@ def main():
         if r is None:
             skipped[why.split(" ")[0]] = skipped.get(why.split(" ")[0], 0) + 1
             continue
-        prev = state.get(sym, {})
+        prev = state.get(sym)
+        if not isinstance(prev, dict):   # حالة قديمة (نسخة 2) أو تالفة
+            prev = {}
         if prev.get("date") == str(today) and (prev.get("type") == "entry" or r["type"] == "watch"):
             continue   # تنبيه واحد لكل سهم باليوم
         (entries if r["type"] == "entry" else watches).append(r)
