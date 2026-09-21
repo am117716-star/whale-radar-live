@@ -95,6 +95,22 @@ def daily_as_of(ddf, D):
 
 
 # ============================ إعادة التشغيل ============================
+def walk(j0, j_end, stop, target, dates, op, hi, lo, cl):
+    """يمشي من الشمعة j0 إلى j_end: أول لمسة وقف/هدف (الوقف أولًا بنفس الشمعة = تحفّظ).
+    عند بداية جلسة جديدة: لو الافتتاح تحت الوقف يخرج بسعر الافتتاح (فجوة)، ولو فوق الهدف يخرج بالافتتاح."""
+    for j in range(j0, j_end + 1):
+        if j > j0 and dates[j] != dates[j - 1]:
+            if op[j] <= stop:
+                return "stop", float(op[j]), j - j0 + 1
+            if op[j] >= target:
+                return "target", float(op[j]), j - j0 + 1
+        if lo[j] <= stop:
+            return "stop", float(stop), j - j0 + 1
+        if hi[j] >= target:
+            return "target", float(target), j - j0 + 1
+    return "none", float(cl[j_end]), j_end - j0 + 1
+
+
 def replay_symbol(sym, df, ddf, earn):
     rows = []
     dates = np.array([t.date() for t in df.index])
@@ -159,6 +175,16 @@ def replay_symbol(sym, df, ddf, earn):
                 if outcome != "none" and out1 != "none":
                     break
             seg_hi = float(hi[j0:day_end + 1].max()); seg_lo = float(lo[j0:day_end + 1].min())
+            # سوينق: نفس الوقف/الهدف لكن نصبر حتى 1–3 جلسات بعد يوم الدخول (مع فجوات الافتتاح)
+            swing = {}
+            for h in (1, 2, 3):
+                if di + h >= len(days):
+                    swing[h] = None; continue
+                end_h = int(np.where(dates == days[di + h])[0][-1])
+                o_h, x_h, b_h = walk(j0, end_h, stop, target, dates, op, hi, lo, cl)
+                swing[h] = dict(outcome=o_h, exit_pct=round((x_h / fill - 1) * 100, 2),
+                                close_pct=round((cl[end_h] / fill - 1) * 100, 2),
+                                max_up=round((float(hi[j0:end_h + 1].max()) / fill - 1) * 100, 2))
             rows.append(dict(
                 date=str(D), sym=sym, grade=r["grade"], pattern=r["pattern"], score=r["score"],
                 alert_time=now.strftime("%H:%M"), whale_time=r["whale_time"], entry=entry, fill=round(float(fill), 2),
@@ -167,7 +193,9 @@ def replay_symbol(sym, df, ddf, earn):
                 max_up_pct=round((seg_hi / fill - 1) * 100, 2), max_dn_pct=round((seg_lo / fill - 1) * 100, 2),
                 outcome_1pct=out1, minutes_1pct=(bars1 * 5 if bars1 else ""),
                 spike=r["spike"], pace=r["pace"], clv=r["clv"], rsi=r["rsi"], room=r["room"],
-                wall_up=r["wall_up"] if r["wall_up"] else "", triangle=r["triangle"], base=r["base"]))
+                wall_up=r["wall_up"] if r["wall_up"] else "", triangle=r["triangle"], base=r["base"],
+                **{f"swing{h}_{k}": (swing[h][k] if swing[h] else "") for h in (1, 2, 3)
+                   for k in ("outcome", "exit_pct", "close_pct", "max_up")}))
             break                                          # تنبيه دخول واحد لكل سهم باليوم
     return rows, n_analyze
 
@@ -210,6 +238,16 @@ def summarize(rows, n_days, n_syms):
     hits = [r for r in ev if r["outcome"] == "target"]
     if hits:
         L.append(f"متوسط الوقت للهدف: {np.mean([r['minutes'] for r in hits]):.0f} دقيقة | متوسط انزلاق التعبئة {np.mean([r['slip_pct'] for r in ev]):+.2f}%")
+    L.append("— سوينق (نفس الإشارات، نفس الوقف والهدف، لكن نصبر أيام بدل نفس اليوم) —")
+    for h in (1, 2, 3):
+        e = [r for r in ev if r.get(f"swing{h}_outcome") not in ("", None)]
+        if not e:
+            continue
+        tg = sum(r[f"swing{h}_outcome"] == "target" for r in e); sg = sum(r[f"swing{h}_outcome"] == "stop" for r in e)
+        L.append(f"حتى {h} جلسة بعد الدخول: {len(e)} | هدف ✅ {tg} ({pct(tg, len(e))}) | وقف ❌ {sg} ({pct(sg, len(e))}) | "
+                 f"متوسط {np.mean([r[f'swing{h}_exit_pct'] for r in e]):+.2f}% | بدون وقف/هدف (إغلاق الجلسة {h}): "
+                 f"{np.mean([r[f'swing{h}_close_pct'] for r in e]):+.2f}% ، موجبة {pct(sum(r[f'swing{h}_close_pct'] > 0 for r in e), len(e))} | "
+                 f"متوسط أعلى ارتفاع {np.mean([r[f'swing{h}_max_up'] for r in e]):+.2f}%")
     return "\n".join(L)
 
 
@@ -235,6 +273,7 @@ def main():
     cols = ["date", "sym", "grade", "pattern", "score", "alert_time", "whale_time", "entry", "fill", "slip_pct",
             "target", "stop", "outcome", "exit_pct", "minutes", "max_up_pct", "max_dn_pct", "outcome_1pct",
             "minutes_1pct", "spike", "pace", "clv", "rsi", "room", "wall_up", "triangle", "base"]
+    cols += [f"swing{h}_{k}" for h in (1, 2, 3) for k in ("outcome", "exit_pct", "close_pct", "max_up")]
     with open("backtest_results.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore"); w.writeheader(); w.writerows(rows)
     summ = summarize(rows, n_days, len(intra))
