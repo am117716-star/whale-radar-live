@@ -1,0 +1,52 @@
+name: whale-daily
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "daily_backtest.py"
+      - ".github/workflows/daily.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: whale-daily
+  cancel-in-progress: true
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -q yfinance pandas numpy
+
+      - name: Daily swing backtest (3y, breakout + MA50 bounce, random baseline)
+        run: python daily_backtest.py
+
+      - name: Save results to repo
+        if: always()
+        run: |
+          git config user.name "whale-bot"
+          git config user.email "whale-bot@users.noreply.github.com"
+          for f in daily_results.csv daily_summary.txt; do [ -f "$f" ] && git add "$f"; done
+          if git diff --cached --quiet; then echo "nothing to save"; exit 0; fi
+          git commit -q -m "daily results [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -q origin main && git push -q origin HEAD:main && echo "pushed" && break
+            echo "push retry $i"; sleep 15
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily
+          path: |
+            daily_results.csv
+            daily_summary.txt
