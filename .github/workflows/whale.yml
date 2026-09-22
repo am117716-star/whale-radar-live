@@ -51,12 +51,19 @@ jobs:
           git config user.name "whale-bot"
           git config user.email "whale-bot@users.noreply.github.com"
           save_state() {
-            git add state.json alerts.jsonl results.csv daily_cache.json 2>/dev/null || true
+            # git add يفشل كله لو ملف واحد ناقص — لذلك نضيف الموجود فقط
+            for f in state.json alerts.jsonl results.csv daily_cache.json; do
+              [ -f "$f" ] && git add "$f"
+            done
             if ! git diff --cached --quiet; then
-              git commit -q -m "state update"
+              git commit -q -m "state update [skip ci]"
               git pull --rebase -q origin main || true
-              git push -q origin HEAD:main || true
+              git push -q origin HEAD:main || echo "push failed"
             fi
+          }
+          sync_state() {
+            # يجلب آخر حالة من المستودع (تنبيهات تشغيلة سابقة بنفس اليوم)
+            git pull --rebase -q origin main || true
           }
           echo "MODE=$MODE"
           if [ "$MODE" = "test" ]; then
@@ -64,6 +71,7 @@ jobs:
             exit 0
           fi
           if [ "$MODE" = "evaluate" ]; then
+            sync_state
             python live_whale.py --evaluate || true
             save_state
             exit 0
@@ -73,6 +81,7 @@ jobs:
           CLOSE_MIN=$((20 * 60 + 5))
           END_MIN=$((START_MIN + 345)); [ "$END_MIN" -gt "$CLOSE_MIN" ] && END_MIN=$CLOSE_MIN
           echo "session loop: start $START_MIN → end $END_MIN (minutes UTC), every 5 min"
+          sync_state
           while :; do
             NOW_MIN=$((10#$(date -u +%H) * 60 + 10#$(date -u +%M)))
             [ "$NOW_MIN" -ge "$END_MIN" ] && break
@@ -83,6 +92,7 @@ jobs:
           echo "session loop finished"
           # التقييم بعد الإقفال — فقط التشغيلة اللي وصلت للإقفال، ومرة وحدة باليوم
           if [ "$END_MIN" -eq "$CLOSE_MIN" ]; then
+            sync_state
             TODAY=$(date -u +%F)
             if ! grep -q "^$TODAY," results.csv 2>/dev/null; then
               python live_whale.py --evaluate || true
